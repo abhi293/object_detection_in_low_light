@@ -1,0 +1,20 @@
+# Requirements for Low-Light Object Detection
+
+# Core dependencies
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Data processing
+numpy>=1.24.0
+pillow>=9.5.0
+
+# Training utilities
+tqdm>=4.65.0
+
+# Optional: For DirectML support (Intel integrated GPUs)
+# torch-directml
+
+# Optional: For visualization and analysis
+# matplotlib>=3.7.0
+# opencv-python>=4.7.0
+# tensorboard>=2.13.0
