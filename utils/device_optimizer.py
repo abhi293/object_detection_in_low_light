@@ -37,17 +37,25 @@ def optimize_for_device(device_type):
             'pin_memory': True,
             'prefetch_factor': 2,
             'persistent_workers': True,
-            'gradient_accumulation_steps': 1
+            'gradient_accumulation_steps': 1,
+            'use_gradient_checkpointing': False,
+            'reduce_image_size': False,
+            'default_image_size': 416,  # Full resolution for CUDA
+            'default_base_channels': 32  # Full model capacity for CUDA
         }
     elif 'DirectML' in device_type:
         # Very conservative settings for integrated GPU (Intel Iris Xe)
         return {
-            'batch_size': 4,  # Reduced from 16 to prevent OOM
+            'batch_size': 1,  # Minimum to prevent OOM on integrated GPU
             'num_workers': 0,  # Reduced to save memory
             'pin_memory': False,
             'prefetch_factor': None,
             'persistent_workers': False,
-            'gradient_accumulation_steps': 8  # Increased to maintain effective batch size of 32
+            'gradient_accumulation_steps': 16,  # Increased to maintain effective batch size of 16
+            'use_gradient_checkpointing': True,  # Enable gradient checkpointing
+            'reduce_image_size': True,  # Use smaller images
+            'default_image_size': 256,  # Default to 256 for DirectML
+            'default_base_channels': 8  # Even smaller model
         }
     else:  # CPU
         return {
@@ -56,7 +64,11 @@ def optimize_for_device(device_type):
             'pin_memory': False,
             'prefetch_factor': None,
             'persistent_workers': False,
-            'gradient_accumulation_steps': 4
+            'gradient_accumulation_steps': 4,
+            'use_gradient_checkpointing': False,
+            'reduce_image_size': False,
+            'default_image_size': 320,  # Moderate size for CPU
+            'default_base_channels': 24  # Moderate capacity for CPU
         }
 
 

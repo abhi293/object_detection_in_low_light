@@ -82,6 +82,11 @@ ExDark_Dataset/
     Bottle/
     ...
 ```
+**Dataset Download link**
+#### https://github.com/cs-chan/Exclusively-Dark-Image-Dataset
+
+**OR**
+#### https://www.kaggle.com/datasets/washingtongold/exdark-dataset
 
 ### 3. Basic Training
 
@@ -94,6 +99,13 @@ The system will automatically:
 - Detect your device (CUDA/DirectML/CPU)
 - Optimize batch size and workers
 - Use appropriate gradient accumulation
+- Adjust model size for device capability
+
+### Device Auto-Configuration
+
+**CUDA GPU (Full Power):** batch=32, image=416px, channels=32, ~7.65M params  
+**DirectML GPU (Lightweight):** batch=1, image=256px, channels=8, ~0.5M params  
+**CPU (Balanced):** batch=8, image=320px, channels=24, ~4M params
 
 ## 🎮 Training Options
 
@@ -170,19 +182,50 @@ python train.py \
 
 ## 💡 Device-Specific Recommendations
 
-### NVIDIA GPU (RTX 4060)
-```bash
-python train.py --batch_size 32 --num_workers 4
-```
-**Expected:** Fast training, ~20-30 seconds/epoch
+The system **automatically detects your device** and configures optimal settings:
 
-### Intel Integrated GPU (DirectML)
+### NVIDIA GPU (CUDA) - Full Power Mode 🚀
 ```bash
-python train.py --batch_size 4 --num_workers 0
-```
-**Expected:** Slower training, uses gradient accumulation (8x) to maintain effective batch size of 32
+# Simple - auto-configured for maximum performance
+python train.py --data_root ExDark_Dataset/ExDark
 
-### CPU Only
+# What you get automatically:
+# - Batch size: 32
+# - Image size: 416px (full resolution)
+# - Base channels: 32 (full model ~7.65M params)
+# - No gradient checkpointing
+# - Multi-threaded data loading (4 workers)
+```
+**Performance:** 
+- Training speed: ~20-30 seconds/epoch (RTX 4060)
+- Model capacity: Full (7.65M parameters)
+- Memory usage: ~4-6GB VRAM
+
+### Intel Integrated GPU (DirectML) - Optimized Mode 💡
+```bash
+# Automatic (recommended - will auto-configure)
+python train.py --data_root ExDark_Dataset/ExDark
+
+# What you get automatically:
+# - Batch size: 1 (with 16x gradient accumulation)
+# - Image size: 256px (reduced)
+# - Base channels: 8 (lightweight ~0.5M params)
+# - Gradient checkpointing enabled
+# - CPU data loading
+
+# Or use the optimized batch script
+train_directml.bat
+
+# Manual ultra-light (if still having issues)
+python train.py --image_size 224 --base_channels 8
+```
+**Performance:**
+- Training speed: ~5-10 minutes/epoch
+- Model capacity: Lightweight (0.5M parameters)
+- Memory usage: ~1-2GB
+- Prevents driver timeout
+
+### CPU Only - Balanced Mode ⚖️
 ```bash
 python train.py --batch_size 8 --num_workers 0
 ```
@@ -208,17 +251,69 @@ Validation Loss: 2.3120, mAP: 0.3456
 - `lr` - Current learning rate
 - `mAP` - Mean Average Precision @ IoU=0.5
 
-## 📈 Checkpoints
+## 📈 Visualization & Results
 
-Checkpoints are saved in the specified directory:
+### Automatic Visualization
+Training automatically generates visualizations at completion:
 
 ```
 checkpoints/
 ├── best_model.pth              # Best model (highest mAP)
 ├── checkpoint_epoch_5.pth      # Periodic checkpoints
 ├── checkpoint_epoch_10.pth
-└── train_config.json           # Training configuration
+├── train_config.json           # Training configuration
+└── visualizations/             # Auto-generated plots
+    ├── training_curves.png     # Loss and mAP curves
+    ├── loss_breakdown.png      # Detailed loss components
+    ├── training_summary.png    # Comprehensive summary
+    └── training_metrics.json   # Metrics in JSON format
 ```
+
+### Manual Visualization
+
+**Visualize Training Metrics:**
+```bash
+python visualize_results.py \
+  --checkpoint checkpoints/best_model.pth \
+  --mode metrics \
+  --output_dir visualizations
+```
+
+**Visualize Model Predictions:**
+```bash
+python visualize_results.py \
+  --checkpoint checkpoints/best_model.pth \
+  --mode predictions \
+  --data_root ExDark_Dataset/ExDark \
+  --num_samples 10 \
+  --device cpu \
+  --conf_threshold 0.3
+```
+
+**Complete Visualization (metrics + predictions):**
+```bash
+python visualize_results.py \
+  --checkpoint checkpoints/best_model.pth \
+  --mode both \
+  --data_root ExDark_Dataset/ExDark
+```
+
+**Using Batch Script (Windows):**
+```bash
+# Metrics only
+visualize.bat checkpoints/best_model.pth metrics
+
+# Both metrics and predictions
+visualize.bat checkpoints/best_model.pth both
+```
+
+### Generated Visualizations
+
+**1. Training Curves** - Loss and mAP progression over epochs
+**2. Loss Breakdown** - Detailed component losses (illumination, restoration, detection)
+**3. Training Summary** - Comprehensive overview with statistics
+**4. Predictions** - Side-by-side original and enhanced images with bounding boxes
+**5. Metrics JSON** - All metrics in machine-readable format
 
 ### Resume Training
 ```bash
@@ -275,10 +370,50 @@ python train.py --resume checkpoints/best_model.pth
 
 ## 🔧 Troubleshooting
 
-### Out of Memory (OOM)
+### Out of Memory (OOM) - DirectML / Integrated GPU
+
+**Error:** `RuntimeError: Not enough memory resources are available to complete this operation.`
+
+**Solution (try in order):**
+
+1. **Let auto-detection handle it:**
+   ```bash
+   python train.py --data_root ExDark_Dataset/ExDark
+   ```
+   The system will automatically use optimal settings for DirectML.
+
+2. **Use the optimized batch script:**
+   ```bash
+   train_directml.bat
+   ```
+
+3. **Reduce image size:**
+   ```bash
+   python train.py --image_size 256
+   # or even smaller
+   python train.py --image_size 224
+   ```
+
+4. **Reduce model size:**
+   ```bash
+   python train.py --base_channels 16
+   # or even smaller
+   python train.py --base_channels 8
+   ```
+
+5. **Combine all optimizations:**
+   ```bash
+   python train.py \
+     --image_size 224 \
+     --base_channels 8 \
+     --lambda_detection 1.0
+   ```
+
+### Out of Memory (OOM) - NVIDIA GPU
+
 ```bash
 # Reduce batch size
-python train.py --batch_size 4
+python train.py --batch_size 8
 
 # Or reduce image size
 python train.py --image_size 320
@@ -303,6 +438,20 @@ python train.py \
   --lambda_illumination 0.5 \
   --lambda_detection 2.5
 ```
+
+## 🎨 Testing Visualization Tools
+
+Generate sample plots to test the visualization pipeline:
+
+```bash
+python generate_sample_plots.py
+```
+
+This creates sample visualizations showing:
+- Training and validation loss curves
+- Component loss breakdown
+- Comprehensive training summary
+- Confusion matrix
 
 ## 📝 Notes
 

@@ -48,34 +48,35 @@ class YOLODetectionHead(nn.Module):
     Multi-scale YOLO-style detection head
     Processes restored features to detect objects
     """
-    def __init__(self, num_classes=12, num_anchors=3):
+    def __init__(self, num_classes=12, num_anchors=3, base_channels=32):
         super(YOLODetectionHead, self).__init__()
         self.num_classes = num_classes
         self.num_anchors = num_anchors
+        self.base_channels = base_channels
         
-        # Feature adaptation layers for different scales
+        # Feature adaptation layers for different scales (adapt to base_channels)
         self.adapt_small = nn.Sequential(
-            nn.Conv2d(32, 64, 3, 1, 1),
-            nn.BatchNorm2d(64),
+            nn.Conv2d(base_channels, base_channels * 2, 3, 1, 1),
+            nn.BatchNorm2d(base_channels * 2),
             nn.LeakyReLU(0.1, inplace=True)
         )
         
         self.adapt_medium = nn.Sequential(
-            nn.Conv2d(64, 128, 3, 1, 1),
-            nn.BatchNorm2d(128),
+            nn.Conv2d(base_channels * 2, base_channels * 4, 3, 1, 1),
+            nn.BatchNorm2d(base_channels * 4),
             nn.LeakyReLU(0.1, inplace=True)
         )
         
         self.adapt_large = nn.Sequential(
-            nn.Conv2d(128, 256, 3, 1, 1),
-            nn.BatchNorm2d(256),
+            nn.Conv2d(base_channels * 4, base_channels * 8, 3, 1, 1),
+            nn.BatchNorm2d(base_channels * 8),
             nn.LeakyReLU(0.1, inplace=True)
         )
         
         # Detection heads for different scales
-        self.detect_small = DetectionBlock(64, num_classes, num_anchors)   # For small objects
-        self.detect_medium = DetectionBlock(128, num_classes, num_anchors)  # For medium objects
-        self.detect_large = DetectionBlock(256, num_classes, num_anchors)   # For large objects
+        self.detect_small = DetectionBlock(base_channels * 2, num_classes, num_anchors)   # For small objects
+        self.detect_medium = DetectionBlock(base_channels * 4, num_classes, num_anchors)  # For medium objects
+        self.detect_large = DetectionBlock(base_channels * 8, num_classes, num_anchors)   # For large objects
         
         # Predefined anchors (will be scaled based on feature map size)
         self.register_buffer('anchors_small', torch.tensor([
@@ -195,13 +196,14 @@ class YOLODetectionHead(nn.Module):
 
 if __name__ == "__main__":
     # Test detection head
-    model = YOLODetectionHead(num_classes=12)
+    base_channels = 32
+    model = YOLODetectionHead(num_classes=12, base_channels=base_channels)
     
-    restored_features = torch.randn(2, 32, 416, 416)
+    restored_features = torch.randn(2, base_channels, 416, 416)
     decoder_features = [
-        torch.randn(2, 128, 52, 52),   # Large scale
-        torch.randn(2, 64, 104, 104),  # Medium scale
-        torch.randn(2, 32, 208, 208)   # Small scale
+        torch.randn(2, base_channels * 4, 52, 52),   # Large scale
+        torch.randn(2, base_channels * 2, 104, 104),  # Medium scale
+        torch.randn(2, base_channels, 208, 208)   # Small scale
     ]
     
     output = model(restored_features, decoder_features)

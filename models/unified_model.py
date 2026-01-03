@@ -17,10 +17,14 @@ class LowLightObjectDetector(nn.Module):
     2. Multi-Objective Restoration (illumination + denoise + deblur)
     3. YOLO Detection Head (object detection)
     """
-    def __init__(self, num_classes=12, base_channels=32, num_anchors=3):
+    def __init__(self, num_classes=12, base_channels=32, num_anchors=3, use_gradient_checkpointing=False):
         super(LowLightObjectDetector, self).__init__()
         
         self.num_classes = num_classes
+        self.use_gradient_checkpointing = use_gradient_checkpointing
+        
+        # Reduce curve iterations for smaller models (memory constrained devices)
+        num_curve_iterations = 4 if base_channels <= 16 else 8
         
         # Stage 1: Shared encoder for feature extraction
         self.encoder = RestorationEncoder(
@@ -31,14 +35,40 @@ class LowLightObjectDetector(nn.Module):
         # Stage 2: Multi-objective restoration
         self.restoration = MultiObjectiveRestoration(
             feature_channels=base_channels,
-            num_curve_iterations=8
+            num_curve_iterations=num_curve_iterations
         )
         
         # Stage 3: Detection head
         self.detector = YOLODetectionHead(
             num_classes=num_classes,
-            num_anchors=num_anchors
+            num_anchors=num_anchors,
+            base_channels=base_channels
         )
+        
+        # Enable gradient checkpointing if requested
+        if use_gradient_checkpointing:
+            self._enable_gradient_checkpointing()
+        
+        # Enable gradient checkpointing if requested
+        if use_gradient_checkpointing:
+            self._enable_gradient_checkpointing()
+    
+    def _enable_gradient_checkpointing(self):
+        """Enable gradient checkpointing to reduce memory usage"""
+        # Store the original bottleneck forward
+        if hasattr(self.encoder, 'bottleneck'):
+            original_bottleneck_forward = self.encoder.bottleneck.forward
+            
+            def checkpointed_forward(x):
+                """Checkpointed forward pass for bottleneck"""
+                return torch.utils.checkpoint.checkpoint(
+                    original_bottleneck_forward, 
+                    x, 
+                    use_reentrant=False
+                )
+            
+            # Replace forward method with checkpointed version
+            self.encoder.bottleneck.forward = checkpointed_forward
     
     def forward(self, x, return_all=True):
         """

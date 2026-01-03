@@ -15,6 +15,12 @@ from models import LowLightObjectDetector
 from data import ExDarkDataset, get_train_transforms, get_val_transforms, collate_fn
 from losses import ZeroDCELoss, SelfSupervisedRestorationLoss, MultiScaleDetectionLoss
 from utils import get_device, optimize_for_device, print_device_info, DetectionMetrics
+from utils.visualization import (
+    plot_training_curves,
+    plot_loss_breakdown,
+    create_training_summary,
+    save_metrics_json
+)
 from config.default_config import Config
 
 
@@ -31,8 +37,8 @@ def parse_args():
     # Model arguments
     parser.add_argument('--num_classes', type=int, default=12,
                        help='Number of object classes (default: 12 for ExDark)')
-    parser.add_argument('--base_channels', type=int, default=32,
-                       help='Base number of channels in encoder (default: 32)')
+    parser.add_argument('--base_channels', type=int, default=None,
+                       help='Base number of channels in encoder (default: 32, auto-reduced for DirectML)')
     parser.add_argument('--image_size', type=int, default=416,
                        help='Input image size (default: 416)')
     
@@ -162,44 +168,57 @@ def train_one_epoch(model, dataloader, criterion_dict, optimizer, scheduler, dev
     optimizer.zero_grad()
     
     for batch_idx, (images, targets) in enumerate(pbar):
-        # Move to device
-        images = images.to(device)
-        
-        # Forward pass
-        outputs = model(images, return_all=True)
-        
-        # Compute losses
-        # 1. Illumination enhancement loss (Zero-DCE)
-        loss_illum = criterion_dict['illumination'](
-            outputs['enhanced_image'],
-            images,
-            outputs['curve_params']
-        )
-        
-        # 2. Restoration loss (self-supervised)
-        loss_resto = criterion_dict['restoration'](
-            outputs['enhanced_image'],
-            outputs['denoised_image'],
-            outputs['restored_image']
-        )
-        
-        # 3. Detection loss
-        loss_detect = criterion_dict['detection'](
-            outputs['predictions'],
-            targets
-        )
-        
-        # Combined loss
-        loss = (
-            args.lambda_illumination * loss_illum['total'] +
-            (args.lambda_denoise + args.lambda_deblur) * 
-            (loss_resto['noise_variance'] + loss_resto['sharpness']) +
-            args.lambda_detection * loss_detect['total']
-        )
-        
-        # Backward pass with gradient accumulation
-        loss = loss / grad_accum_steps
-        loss.backward()
+        try:
+            # Move to device
+            images = images.to(device)
+            
+            # Forward pass
+            outputs = model(images, return_all=True)
+            
+            # Compute losses
+            # 1. Illumination enhancement loss (Zero-DCE)
+            loss_illum = criterion_dict['illumination'](
+                outputs['enhanced_image'],
+                images,
+                outputs['curve_params']
+            )
+            
+            # 2. Restoration loss (self-supervised)
+            loss_resto = criterion_dict['restoration'](
+                outputs['enhanced_image'],
+                outputs['denoised_image'],
+                outputs['restored_image']
+            )
+            
+            # 3. Detection loss
+            loss_detect = criterion_dict['detection'](
+                outputs['predictions'],
+                targets
+            )
+            
+            # Combined loss
+            loss = (
+                args.lambda_illumination * loss_illum['total'] +
+                (args.lambda_denoise + args.lambda_deblur) * 
+                (loss_resto['noise_variance'] + loss_resto['sharpness']) +
+                args.lambda_detection * loss_detect['total']
+            )
+            
+            # Backward pass with gradient accumulation
+            loss = loss / grad_accum_steps
+            loss.backward()
+            
+        except RuntimeError as e:
+            if "memory" in str(e).lower() or "out of memory" in str(e).lower():
+                print(f"\n❌ Out of Memory Error at batch {batch_idx}")
+                print("💡 Suggestions:")
+                print("   1. Use smaller image size: --image_size 256 or --image_size 224")
+                print("   2. Reduce base channels: --base_channels 16 or --base_channels 8")
+                print("   3. The system will auto-configure for DirectML next run")
+                print(f"\n   Try: python train.py --image_size 256 --base_channels 16")
+                raise
+            else:
+                raise
         
         if (batch_idx + 1) % grad_accum_steps == 0:
             # Gradient clipping
@@ -210,6 +229,14 @@ def train_one_epoch(model, dataloader, criterion_dict, optimizer, scheduler, dev
             
             if scheduler is not None and args.scheduler == 'cosine':
                 scheduler.step()
+            
+            # Clear cache for DirectML to prevent memory accumulation
+            if 'DirectML' in str(device):
+                try:
+                    import torch_directml
+                    torch_directml.device(device).empty_cache()
+                except:
+                    pass
         
         # Update metrics
         total_loss += loss.item() * grad_accum_steps
@@ -303,7 +330,7 @@ def validate(model, dataloader, criterion_dict, device, args):
     }
 
 
-def save_checkpoint(model, optimizer, scheduler, epoch, args, best_map, save_path):
+def save_checkpoint(model, optimizer, scheduler, epoch, args, best_map, save_path, history=None):
     """Save training checkpoint"""
     checkpoint = {
         'epoch': epoch,
@@ -313,6 +340,10 @@ def save_checkpoint(model, optimizer, scheduler, epoch, args, best_map, save_pat
         'best_map': best_map,
         'args': vars(args)
     }
+    
+    if history is not None:
+        checkpoint['history'] = history
+    
     torch.save(checkpoint, save_path)
     print(f"Checkpoint saved to {save_path}")
 
@@ -335,6 +366,25 @@ def main():
         args.num_workers = device_params['num_workers']
     
     grad_accum_steps = device_params['gradient_accumulation_steps']
+    use_gradient_checkpointing = device_params.get('use_gradient_checkpointing', False)
+    
+    # Apply device-specific image size if not user-specified
+    if args.image_size == 416:  # Default value, not user-specified
+        if device_params.get('reduce_image_size', False):
+            args.image_size = device_params.get('default_image_size', 256)
+            print(f"\n⚠️  Auto-adjusted image size to {args.image_size} for {device_type}")
+        elif 'CUDA' in device_type:
+            print(f"\n✅ Using full resolution ({args.image_size}px) for {device_type}")
+    
+    # Auto-set base_channels based on device if not specified
+    if args.base_channels is None:
+        args.base_channels = device_params.get('default_base_channels', 32)
+        if 'CUDA' in device_type:
+            print(f"✅ Using full model capacity (base_channels={args.base_channels}) for {device_type}")
+        elif 'DirectML' in device_type:
+            print(f"⚠️  Using reduced model (base_channels={args.base_channels}) for {device_type}")
+        else:
+            print(f"ℹ️  Using moderate model (base_channels={args.base_channels}) for {device_type}")
     
     # Print device info
     print_device_info(device, device_type, device_params)
@@ -406,10 +456,20 @@ def main():
     print("\nCreating model...")
     model = LowLightObjectDetector(
         num_classes=args.num_classes,
-        base_channels=args.base_channels
+        base_channels=args.base_channels,
+        use_gradient_checkpointing=use_gradient_checkpointing
     ).to(device)
     
-    print(f"Model parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
+    model_params = sum(p.numel() for p in model.parameters()) / 1e6
+    print(f"Model parameters: {model_params:.2f}M")
+    
+    if 'CUDA' in device_type:
+        print(f"🚀 Full-capacity model ready for GPU acceleration!")
+    elif 'DirectML' in device_type:
+        print(f"💡 Lightweight model optimized for integrated GPU")
+    
+    if use_gradient_checkpointing:
+        print("✅ Gradient checkpointing enabled for memory efficiency")
     
     # Create loss functions
     criterion_dict = {
@@ -452,6 +512,19 @@ def main():
     # Training loop
     print("\nStarting training...\n")
     
+    # Initialize training history
+    history = {
+        'epochs': [],
+        'train_loss': [],
+        'train_illum_loss': [],
+        'train_resto_loss': [],
+        'train_detect_loss': [],
+        'val_loss': [],
+        'val_mAP': [],
+        'learning_rate': [],
+        'class_names': Config.CLASS_NAMES
+    }
+    
     for epoch in range(start_epoch, args.epochs + 1):
         # Train
         train_metrics = train_one_epoch(
@@ -466,6 +539,16 @@ def main():
             val_metrics = validate(model, val_loader, criterion_dict, device, args)
             print(f"Validation Loss: {val_metrics['total_loss']:.4f}, mAP: {val_metrics['mAP']:.4f}")
             
+            # Update history
+            history['epochs'].append(epoch)
+            history['train_loss'].append(train_metrics['total_loss'])
+            history['train_illum_loss'].append(train_metrics['illumination_loss'])
+            history['train_resto_loss'].append(train_metrics['restoration_loss'])
+            history['train_detect_loss'].append(train_metrics['detection_loss'])
+            history['val_loss'].append(val_metrics['total_loss'])
+            history['val_mAP'].append(val_metrics['mAP'])
+            history['learning_rate'].append(optimizer.param_groups[0]['lr'])
+            
             # Update scheduler if using plateau
             if scheduler and args.scheduler == 'plateau':
                 scheduler.step(val_metrics['total_loss'])
@@ -475,14 +558,16 @@ def main():
                 best_map = val_metrics['mAP']
                 save_checkpoint(
                     model, optimizer, scheduler, epoch, args, best_map,
-                    os.path.join(args.save_dir, 'best_model.pth')
+                    os.path.join(args.save_dir, 'best_model.pth'),
+                    history=history
                 )
         
         # Save periodic checkpoint
         if epoch % args.save_interval == 0:
             save_checkpoint(
                 model, optimizer, scheduler, epoch, args, best_map,
-                os.path.join(args.save_dir, f'checkpoint_epoch_{epoch}.pth')
+                os.path.join(args.save_dir, f'checkpoint_epoch_{epoch}.pth'),
+                history=history
             )
     
     print("\n" + "="*60)
@@ -490,6 +575,22 @@ def main():
     print("="*60)
     print(f"Best mAP: {best_map:.4f}")
     print(f"Checkpoints saved to: {args.save_dir}")
+    
+    # Generate visualizations
+    if len(history['epochs']) > 0:
+        print("\n📊 Generating training visualizations...")
+        viz_dir = os.path.join(args.save_dir, 'visualizations')
+        os.makedirs(viz_dir, exist_ok=True)
+        
+        try:
+            plot_training_curves(history, save_path=os.path.join(viz_dir, 'training_curves.png'))
+            plot_loss_breakdown(history, save_path=os.path.join(viz_dir, 'loss_breakdown.png'))
+            create_training_summary(history, save_path=os.path.join(viz_dir, 'training_summary.png'))
+            save_metrics_json(history, save_path=os.path.join(viz_dir, 'training_metrics.json'))
+            print(f"✅ Visualizations saved to: {viz_dir}")
+        except Exception as e:
+            print(f"⚠️ Warning: Could not generate visualizations: {e}")
+    
     print("="*60)
 
 

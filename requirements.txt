@@ -11,10 +11,12 @@ pillow>=9.5.0
 # Training utilities
 tqdm>=4.65.0
 
+# Visualization
+matplotlib>=3.7.0
+
 # Optional: For DirectML support (Intel integrated GPUs)
 # torch-directml
 
-# Optional: For visualization and analysis
-# matplotlib>=3.7.0
+# Optional: For additional analysis
 # opencv-python>=4.7.0
 # tensorboard>=2.13.0
